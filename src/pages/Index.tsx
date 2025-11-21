@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Icon from '@/components/ui/icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -6,12 +6,20 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import { useToast } from '@/hooks/use-toast';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 type View = 'chat' | 'friends' | 'profile' | 'settings' | 'notifications';
 
@@ -34,14 +42,35 @@ interface Message {
   avatar: string;
   content: string;
   timestamp: string;
+  isOwn?: boolean;
+}
+
+interface Friend {
+  id: string;
+  name: string;
+  status: 'online' | 'offline';
+  avatar: string;
 }
 
 const Index = () => {
+  const { toast } = useToast();
   const [currentView, setCurrentView] = useState<View>('chat');
   const [selectedServer, setSelectedServer] = useState('1');
   const [selectedChannel, setSelectedChannel] = useState('1');
   const [messageInput, setMessageInput] = useState('');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [friends, setFriends] = useState<Friend[]>([]);
+  
   const [inCall, setInCall] = useState(false);
+  const [isMicOn, setIsMicOn] = useState(true);
+  const [isVideoOn, setIsVideoOn] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [showVideoDialog, setShowVideoDialog] = useState(false);
+  
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [username, setUsername] = useState('Мой профиль');
+  const [userTag] = useState('#1234');
 
   const servers: Server[] = [
     { id: '1', name: 'Главный', icon: '🏠' },
@@ -51,41 +80,190 @@ const Index = () => {
   ];
 
   const channels: Channel[] = [
-    { id: '1', name: 'общий', type: 'text', unread: 3 },
+    { id: '1', name: 'общий', type: 'text' },
     { id: '2', name: 'важное', type: 'text' },
     { id: '3', name: 'Голосовой 1', type: 'voice' },
     { id: '4', name: 'Голосовой 2', type: 'voice' },
   ];
 
-  const messages: Message[] = [
-    {
-      id: '1',
-      author: 'Александр',
-      avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Alex',
-      content: 'Привет! Как дела?',
-      timestamp: '14:30',
-    },
-    {
-      id: '2',
-      author: 'Мария',
-      avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Maria',
-      content: 'Отлично! Работаю над новым проектом',
-      timestamp: '14:32',
-    },
-    {
-      id: '3',
-      author: 'Дмитрий',
-      avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Dmitry',
-      content: 'Кто готов к созвону через 10 минут?',
-      timestamp: '14:35',
-    },
-  ];
-
   const handleSendMessage = () => {
     if (messageInput.trim()) {
+      const newMessage: Message = {
+        id: Date.now().toString(),
+        author: username,
+        avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=User',
+        content: messageInput,
+        timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        isOwn: true,
+      };
+      setMessages([...messages, newMessage]);
       setMessageInput('');
     }
   };
+
+  const startCall = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: true, 
+        video: false 
+      });
+      setLocalStream(stream);
+      setInCall(true);
+      setIsMicOn(true);
+      toast({
+        title: "Звонок начат",
+        description: "Вы подключились к голосовому каналу",
+      });
+    } catch (error) {
+      toast({
+        title: "Ошибка",
+        description: "Не удалось получить доступ к микрофону",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const endCall = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      setLocalStream(null);
+    }
+    setInCall(false);
+    setIsVideoOn(false);
+    setIsScreenSharing(false);
+    setShowVideoDialog(false);
+    toast({
+      title: "Звонок завершён",
+      description: "Вы отключились от канала",
+    });
+  };
+
+  const toggleMic = () => {
+    if (localStream) {
+      const audioTrack = localStream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMicOn(audioTrack.enabled);
+        toast({
+          description: audioTrack.enabled ? "Микрофон включён" : "Микрофон выключен",
+        });
+      }
+    }
+  };
+
+  const toggleVideo = async () => {
+    if (!isVideoOn) {
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        if (localStream) {
+          videoStream.getVideoTracks().forEach(track => localStream.addTrack(track));
+        } else {
+          setLocalStream(videoStream);
+        }
+        setIsVideoOn(true);
+        setShowVideoDialog(true);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = localStream;
+        }
+        toast({
+          description: "Камера включена",
+        });
+      } catch (error) {
+        toast({
+          title: "Ошибка",
+          description: "Не удалось получить доступ к камере",
+          variant: "destructive",
+        });
+      }
+    } else {
+      if (localStream) {
+        localStream.getVideoTracks().forEach(track => {
+          track.stop();
+          localStream.removeTrack(track);
+        });
+      }
+      setIsVideoOn(false);
+      setShowVideoDialog(false);
+      toast({
+        description: "Камера выключена",
+      });
+    }
+  };
+
+  const toggleScreenShare = async () => {
+    if (!isScreenSharing) {
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        setIsScreenSharing(true);
+        setShowVideoDialog(true);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = screenStream;
+        }
+        
+        screenStream.getVideoTracks()[0].onended = () => {
+          setIsScreenSharing(false);
+          setShowVideoDialog(false);
+        };
+        
+        toast({
+          description: "Демонстрация экрана включена",
+        });
+      } catch (error) {
+        toast({
+          title: "Ошибка",
+          description: "Не удалось начать демонстрацию экрана",
+          variant: "destructive",
+        });
+      }
+    } else {
+      if (localVideoRef.current && localVideoRef.current.srcObject) {
+        const stream = localVideoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
+      setIsScreenSharing(false);
+      setShowVideoDialog(false);
+      toast({
+        description: "Демонстрация экрана выключена",
+      });
+    }
+  };
+
+  const addFriend = () => {
+    const newFriend: Friend = {
+      id: Date.now().toString(),
+      name: `Новый друг ${friends.length + 1}`,
+      status: 'online',
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Friend${Date.now()}`,
+    };
+    setFriends([...friends, newFriend]);
+    toast({
+      title: "Друг добавлен",
+      description: `${newFriend.name} теперь в вашем списке друзей`,
+    });
+  };
+
+  const removeFriend = (id: string) => {
+    setFriends(friends.filter(f => f.id !== id));
+    toast({
+      description: "Друг удалён из списка",
+    });
+  };
+
+  const startPrivateCall = (friendName: string) => {
+    toast({
+      title: "Звонок",
+      description: `Вызов ${friendName}...`,
+    });
+    startCall();
+  };
+
+  useEffect(() => {
+    return () => {
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [localStream]);
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
@@ -94,7 +272,10 @@ const Index = () => {
           variant="ghost"
           size="icon"
           className="w-12 h-12 rounded-2xl bg-primary hover:bg-primary/90 hover:rounded-xl transition-all duration-200"
-          onClick={() => setCurrentView('chat')}
+          onClick={() => {
+            setCurrentView('chat');
+            setSelectedChannel('1');
+          }}
         >
           <Icon name="Home" size={24} className="text-primary-foreground" />
         </Button>
@@ -109,7 +290,11 @@ const Index = () => {
             className={`w-12 h-12 rounded-2xl hover:rounded-xl transition-all duration-200 text-2xl ${
               selectedServer === server.id ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-accent'
             }`}
-            onClick={() => setSelectedServer(server.id)}
+            onClick={() => {
+              setSelectedServer(server.id);
+              setCurrentView('chat');
+              setSelectedChannel('1');
+            }}
           >
             {server.icon}
           </Button>
@@ -119,6 +304,12 @@ const Index = () => {
           variant="ghost"
           size="icon"
           className="w-12 h-12 rounded-2xl bg-muted hover:bg-accent hover:rounded-xl transition-all duration-200 mt-auto"
+          onClick={() => {
+            toast({
+              title: "Создание сервера",
+              description: "Функция в разработке",
+            });
+          }}
         >
           <Icon name="Plus" size={24} />
         </Button>
@@ -134,11 +325,11 @@ const Index = () => {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => toast({ description: "Отправьте ссылку-приглашение друзьям" })}>
                 <Icon name="UserPlus" size={16} className="mr-2" />
                 Пригласить
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setCurrentView('settings')}>
                 <Icon name="Settings" size={16} className="mr-2" />
                 Настройки сервера
               </DropdownMenuItem>
@@ -155,6 +346,9 @@ const Index = () => {
             >
               <Icon name="Users" size={18} className="mr-2" />
               Друзья
+              {friends.length > 0 && (
+                <Badge variant="secondary" className="ml-auto">{friends.length}</Badge>
+              )}
             </Button>
             <Button
               variant="ghost"
@@ -163,7 +357,6 @@ const Index = () => {
             >
               <Icon name="Bell" size={18} className="mr-2" />
               Уведомления
-              <Badge variant="destructive" className="ml-auto">5</Badge>
             </Button>
           </div>
 
@@ -178,7 +371,7 @@ const Index = () => {
                 key={channel.id}
                 variant="ghost"
                 className={`w-full justify-start px-2 ${
-                  selectedChannel === channel.id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                  selectedChannel === channel.id && currentView === 'chat' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
                 }`}
                 onClick={() => {
                   setSelectedChannel(channel.id);
@@ -187,11 +380,6 @@ const Index = () => {
               >
                 <Icon name="Hash" size={18} className="mr-2" />
                 {channel.name}
-                {channel.unread && (
-                  <Badge variant="default" className="ml-auto bg-primary text-primary-foreground">
-                    {channel.unread}
-                  </Badge>
-                )}
               </Button>
             ))}
           </div>
@@ -207,7 +395,13 @@ const Index = () => {
                 key={channel.id}
                 variant="ghost"
                 className="w-full justify-start px-2 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                onClick={() => setInCall(!inCall)}
+                onClick={() => {
+                  if (!inCall) {
+                    startCall();
+                  } else {
+                    endCall();
+                  }
+                }}
               >
                 <Icon name="Volume2" size={18} className="mr-2" />
                 {channel.name}
@@ -219,11 +413,11 @@ const Index = () => {
         <div className="h-14 px-2 border-t border-border flex items-center gap-2 bg-muted/30">
           <Avatar className="w-8 h-8">
             <AvatarImage src="https://api.dicebear.com/7.x/avataaars/svg?seed=User" />
-            <AvatarFallback>Я</AvatarFallback>
+            <AvatarFallback>{username[0]}</AvatarFallback>
           </Avatar>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold truncate">Мой профиль</div>
-            <div className="text-xs text-muted-foreground">#1234</div>
+            <div className="text-sm font-semibold truncate">{username}</div>
+            <div className="text-xs text-muted-foreground">{userTag}</div>
           </div>
           <Button
             variant="ghost"
@@ -242,19 +436,34 @@ const Index = () => {
             <Icon name="Phone" size={18} className="text-primary animate-pulse" />
             <span className="text-sm font-medium">Голосовой канал: {channels.find(c => c.type === 'voice')?.name}</span>
             <div className="flex gap-2 ml-auto">
-              <Button size="sm" variant="ghost" className="h-8">
-                <Icon name="Mic" size={16} className="mr-2" />
-                Микрофон
+              <Button 
+                size="sm" 
+                variant={isMicOn ? "ghost" : "destructive"} 
+                className="h-8"
+                onClick={toggleMic}
+              >
+                <Icon name={isMicOn ? "Mic" : "MicOff"} size={16} className="mr-2" />
+                {isMicOn ? "Микрофон" : "Откл"}
               </Button>
-              <Button size="sm" variant="ghost" className="h-8">
-                <Icon name="Video" size={16} className="mr-2" />
+              <Button 
+                size="sm" 
+                variant={isVideoOn ? "default" : "ghost"} 
+                className="h-8"
+                onClick={toggleVideo}
+              >
+                <Icon name={isVideoOn ? "VideoOff" : "Video"} size={16} className="mr-2" />
                 Видео
               </Button>
-              <Button size="sm" variant="ghost" className="h-8">
+              <Button 
+                size="sm" 
+                variant={isScreenSharing ? "default" : "ghost"} 
+                className="h-8"
+                onClick={toggleScreenShare}
+              >
                 <Icon name="ScreenShare" size={16} className="mr-2" />
                 Экран
               </Button>
-              <Button size="sm" variant="destructive" className="h-8" onClick={() => setInCall(false)}>
+              <Button size="sm" variant="destructive" className="h-8" onClick={endCall}>
                 <Icon name="PhoneOff" size={16} />
               </Button>
             </div>
@@ -287,28 +496,32 @@ const Index = () => {
         {currentView === 'chat' && (
           <>
             <ScrollArea className="flex-1 px-4 py-4">
-              <div className="space-y-4">
-                {messages.map((message) => (
-                  <div key={message.id} className="flex gap-3 hover:bg-muted/30 -mx-2 px-2 py-1 rounded-lg transition-colors group">
-                    <Avatar className="w-10 h-10 mt-0.5">
-                      <AvatarImage src={message.avatar} />
-                      <AvatarFallback>{message.author[0]}</AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2">
-                        <span className="font-semibold text-sm">{message.author}</span>
-                        <span className="text-xs text-muted-foreground">{message.timestamp}</span>
-                      </div>
-                      <p className="text-sm mt-0.5 leading-relaxed">{message.content}</p>
-                    </div>
-                    <div className="opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Button variant="ghost" size="icon" className="w-7 h-7">
-                        <Icon name="MoreVertical" size={14} />
-                      </Button>
-                    </div>
+              {messages.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-muted-foreground">
+                  <div className="text-center">
+                    <Icon name="MessageCircle" size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>Начните общение в этом канале</p>
                   </div>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {messages.map((message) => (
+                    <div key={message.id} className="flex gap-3 hover:bg-muted/30 -mx-2 px-2 py-1 rounded-lg transition-colors group">
+                      <Avatar className="w-10 h-10 mt-0.5">
+                        <AvatarImage src={message.avatar} />
+                        <AvatarFallback>{message.author[0]}</AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-semibold text-sm">{message.author}</span>
+                          <span className="text-xs text-muted-foreground">{message.timestamp}</span>
+                        </div>
+                        <p className="text-sm mt-0.5 leading-relaxed">{message.content}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </ScrollArea>
 
             <div className="p-4">
@@ -337,39 +550,53 @@ const Index = () => {
               <div className="flex gap-3 mb-6">
                 <Button variant="default" size="sm">Все</Button>
                 <Button variant="ghost" size="sm">Онлайн</Button>
-                <Button variant="ghost" size="sm">Ожидают</Button>
-                <Button variant="ghost" size="sm">Заблокированные</Button>
-                <Button variant="default" size="sm" className="ml-auto">
+                <Button variant="default" size="sm" className="ml-auto" onClick={addFriend}>
                   <Icon name="UserPlus" size={16} className="mr-2" />
                   Добавить друга
                 </Button>
               </div>
 
-              <div className="space-y-3">
-                {[1, 2, 3, 4, 5].map((i) => (
-                  <div key={i} className="bg-card rounded-lg p-4 flex items-center gap-3 hover:bg-accent/50 transition-colors">
-                    <Avatar className="w-12 h-12">
-                      <AvatarImage src={`https://api.dicebear.com/7.x/avataaars/svg?seed=Friend${i}`} />
-                      <AvatarFallback>F{i}</AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1">
-                      <div className="font-semibold">Друг {i}</div>
-                      <div className="text-sm text-muted-foreground">Онлайн</div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="ghost" size="icon">
-                        <Icon name="MessageCircle" size={18} />
-                      </Button>
-                      <Button variant="ghost" size="icon">
-                        <Icon name="Phone" size={18} />
-                      </Button>
-                      <Button variant="ghost" size="icon">
-                        <Icon name="Video" size={18} />
-                      </Button>
-                    </div>
+              {friends.length === 0 ? (
+                <div className="flex items-center justify-center h-64 text-muted-foreground">
+                  <div className="text-center">
+                    <Icon name="Users" size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>У вас пока нет друзей</p>
+                    <Button className="mt-4" onClick={addFriend}>
+                      <Icon name="UserPlus" size={16} className="mr-2" />
+                      Добавить первого друга
+                    </Button>
                   </div>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {friends.map((friend) => (
+                    <div key={friend.id} className="bg-card rounded-lg p-4 flex items-center gap-3 hover:bg-accent/50 transition-colors">
+                      <Avatar className="w-12 h-12">
+                        <AvatarImage src={friend.avatar} />
+                        <AvatarFallback>{friend.name[0]}</AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1">
+                        <div className="font-semibold">{friend.name}</div>
+                        <div className="text-sm text-muted-foreground capitalize">{friend.status}</div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button variant="ghost" size="icon" onClick={() => toast({ description: "Личные сообщения скоро!" })}>
+                          <Icon name="MessageCircle" size={18} />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => startPrivateCall(friend.name)}>
+                          <Icon name="Phone" size={18} />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => startPrivateCall(friend.name)}>
+                          <Icon name="Video" size={18} />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => removeFriend(friend.id)}>
+                          <Icon name="X" size={18} />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -382,12 +609,18 @@ const Index = () => {
                 <div className="space-y-4">
                   <div className="bg-card rounded-lg p-4">
                     <label className="text-sm font-medium mb-2 block">Имя пользователя</label>
-                    <Input defaultValue="Мой профиль" />
+                    <Input 
+                      value={username} 
+                      onChange={(e) => setUsername(e.target.value)}
+                    />
                   </div>
                   <div className="bg-card rounded-lg p-4">
                     <label className="text-sm font-medium mb-2 block">Email</label>
                     <Input defaultValue="user@example.com" />
                   </div>
+                  <Button onClick={() => toast({ title: "Сохранено", description: "Настройки успешно обновлены" })}>
+                    Сохранить изменения
+                  </Button>
                 </div>
               </div>
 
@@ -409,55 +642,34 @@ const Index = () => {
         )}
 
         {currentView === 'notifications' && (
-          <div className="flex-1 p-6">
-            <div className="max-w-2xl space-y-3">
-              {[1, 2, 3, 4, 5].map((i) => (
-                <div key={i} className="bg-card rounded-lg p-4 flex items-start gap-3 hover:bg-accent/50 transition-colors">
-                  <Avatar className="w-10 h-10">
-                    <AvatarImage src={`https://api.dicebear.com/7.x/avataaars/svg?seed=Notif${i}`} />
-                    <AvatarFallback>N{i}</AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1">
-                    <div className="font-semibold text-sm">Новое сообщение от Пользователь {i}</div>
-                    <div className="text-sm text-muted-foreground mt-1">
-                      Привет! Есть пара минут для обсуждения проекта?
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-2">2 минуты назад</div>
-                  </div>
-                </div>
-              ))}
+          <div className="flex-1 p-6 flex items-center justify-center">
+            <div className="text-center text-muted-foreground">
+              <Icon name="Bell" size={48} className="mx-auto mb-4 opacity-50" />
+              <p>У вас нет новых уведомлений</p>
             </div>
           </div>
         )}
       </div>
 
-      {currentView === 'chat' && (
-        <div className="w-60 bg-card border-l border-border">
-          <ScrollArea className="h-full p-4">
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">
-                  Участники — 12
-                </h3>
-                <div className="space-y-2">
-                  {[1, 2, 3, 4, 5].map((i) => (
-                    <div key={i} className="flex items-center gap-2 p-1.5 rounded hover:bg-accent/50 cursor-pointer transition-colors">
-                      <div className="relative">
-                        <Avatar className="w-8 h-8">
-                          <AvatarImage src={`https://api.dicebear.com/7.x/avataaars/svg?seed=Member${i}`} />
-                          <AvatarFallback>M{i}</AvatarFallback>
-                        </Avatar>
-                        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-card"></div>
-                      </div>
-                      <span className="text-sm">Участник {i}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </ScrollArea>
-        </div>
-      )}
+      <Dialog open={showVideoDialog} onOpenChange={setShowVideoDialog}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>{isScreenSharing ? "Демонстрация экрана" : "Видеозвонок"}</DialogTitle>
+            <DialogDescription>
+              {isScreenSharing ? "Вы демонстрируете свой экран" : "Ваша камера включена"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="bg-muted rounded-lg overflow-hidden aspect-video">
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
