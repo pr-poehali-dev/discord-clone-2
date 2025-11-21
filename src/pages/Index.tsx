@@ -21,7 +21,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-type View = 'chat' | 'friends' | 'profile' | 'settings' | 'notifications';
+type View = 'dm' | 'friends' | 'settings' | 'notifications' | 'server';
 
 interface Server {
   id: string;
@@ -33,7 +33,6 @@ interface Channel {
   id: string;
   name: string;
   type: 'text' | 'voice';
-  unread?: number;
 }
 
 interface Message {
@@ -45,6 +44,17 @@ interface Message {
   isOwn?: boolean;
 }
 
+interface DirectMessage {
+  id: string;
+  friendId: string;
+  friendName: string;
+  friendAvatar: string;
+  lastMessage: string;
+  timestamp: string;
+  unread?: number;
+  status: 'online' | 'offline';
+}
+
 interface Friend {
   id: string;
   name: string;
@@ -54,21 +64,28 @@ interface Friend {
 
 const Index = () => {
   const { toast } = useToast();
-  const [currentView, setCurrentView] = useState<View>('chat');
-  const [selectedServer, setSelectedServer] = useState('1');
-  const [selectedChannel, setSelectedChannel] = useState('1');
+  const [currentView, setCurrentView] = useState<View>('dm');
+  const [selectedServer, setSelectedServer] = useState<string | null>(null);
+  const [selectedChannel, setSelectedChannel] = useState<string | null>(null);
+  const [selectedDM, setSelectedDM] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [directMessages, setDirectMessages] = useState<DirectMessage[]>([]);
   
   const [inCall, setInCall] = useState(false);
+  const [callWith, setCallWith] = useState<string>('');
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [showVideoDialog, setShowVideoDialog] = useState(false);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  
   const [username, setUsername] = useState('Мой профиль');
   const [userTag] = useState('#1234');
 
@@ -97,27 +114,83 @@ const Index = () => {
         isOwn: true,
       };
       setMessages([...messages, newMessage]);
+      
+      if (selectedDM && currentView === 'dm') {
+        setDirectMessages(prev => prev.map(dm => 
+          dm.id === selectedDM 
+            ? { ...dm, lastMessage: messageInput, timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) }
+            : dm
+        ));
+      }
+      
       setMessageInput('');
     }
   };
 
-  const startCall = async () => {
+  const createPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ]
+    });
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log('New ICE candidate:', event.candidate);
+      }
+    };
+
+    pc.ontrack = (event) => {
+      console.log('Remote track received');
+      setRemoteStream(event.streams[0]);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    return pc;
+  };
+
+  const startCall = async (friendName: string, withVideo: boolean = false) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: true, 
-        video: false 
-      });
+      const constraints = {
+        audio: true,
+        video: withVideo
+      };
+      
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setLocalStream(stream);
+      
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      const pc = createPeerConnection();
+      peerConnectionRef.current = pc;
+
+      stream.getTracks().forEach(track => {
+        pc.addTrack(track, stream);
+      });
+
       setInCall(true);
+      setCallWith(friendName);
       setIsMicOn(true);
+      setIsVideoOn(withVideo);
+      
+      if (withVideo) {
+        setShowVideoDialog(true);
+      }
+
       toast({
         title: "Звонок начат",
-        description: "Вы подключились к голосовому каналу",
+        description: `Вызов ${friendName}...`,
       });
     } catch (error) {
+      console.error('Error starting call:', error);
       toast({
         title: "Ошибка",
-        description: "Не удалось получить доступ к микрофону",
+        description: "Не удалось начать звонок. Проверьте доступ к камере и микрофону.",
         variant: "destructive",
       });
     }
@@ -128,13 +201,26 @@ const Index = () => {
       localStream.getTracks().forEach(track => track.stop());
       setLocalStream(null);
     }
+    
+    if (remoteStream) {
+      remoteStream.getTracks().forEach(track => track.stop());
+      setRemoteStream(null);
+    }
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+
     setInCall(false);
+    setCallWith('');
     setIsVideoOn(false);
     setIsScreenSharing(false);
     setShowVideoDialog(false);
+    
     toast({
       title: "Звонок завершён",
-      description: "Вы отключились от канала",
+      description: "Вы отключились",
     });
   };
 
@@ -155,16 +241,21 @@ const Index = () => {
     if (!isVideoOn) {
       try {
         const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
-        if (localStream) {
-          videoStream.getVideoTracks().forEach(track => localStream.addTrack(track));
-        } else {
-          setLocalStream(videoStream);
+        
+        if (peerConnectionRef.current && localStream) {
+          videoStream.getVideoTracks().forEach(track => {
+            localStream.addTrack(track);
+            peerConnectionRef.current?.addTrack(track, localStream);
+          });
         }
+        
         setIsVideoOn(true);
         setShowVideoDialog(true);
+        
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = localStream;
         }
+        
         toast({
           description: "Камера включена",
         });
@@ -183,7 +274,6 @@ const Index = () => {
         });
       }
       setIsVideoOn(false);
-      setShowVideoDialog(false);
       toast({
         description: "Камера выключена",
       });
@@ -193,16 +283,23 @@ const Index = () => {
   const toggleScreenShare = async () => {
     if (!isScreenSharing) {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: true,
+          audio: false
+        });
+        
         setIsScreenSharing(true);
         setShowVideoDialog(true);
+        
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream;
         }
         
         screenStream.getVideoTracks()[0].onended = () => {
           setIsScreenSharing(false);
-          setShowVideoDialog(false);
+          if (localStream && localVideoRef.current) {
+            localVideoRef.current.srcObject = localStream;
+          }
         };
         
         toast({
@@ -221,7 +318,11 @@ const Index = () => {
         stream.getTracks().forEach(track => track.stop());
       }
       setIsScreenSharing(false);
-      setShowVideoDialog(false);
+      
+      if (localStream && localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      
       toast({
         description: "Демонстрация экрана выключена",
       });
@@ -231,30 +332,41 @@ const Index = () => {
   const addFriend = () => {
     const newFriend: Friend = {
       id: Date.now().toString(),
-      name: `Новый друг ${friends.length + 1}`,
-      status: 'online',
+      name: `Друг ${friends.length + 1}`,
+      status: Math.random() > 0.5 ? 'online' : 'offline',
       avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Friend${Date.now()}`,
     };
     setFriends([...friends, newFriend]);
+    
+    const newDM: DirectMessage = {
+      id: Date.now().toString(),
+      friendId: newFriend.id,
+      friendName: newFriend.name,
+      friendAvatar: newFriend.avatar,
+      lastMessage: 'Начните общение',
+      timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+      status: newFriend.status,
+    };
+    setDirectMessages([...directMessages, newDM]);
+    
     toast({
       title: "Друг добавлен",
-      description: `${newFriend.name} теперь в вашем списке друзей`,
+      description: `${newFriend.name} теперь в вашем списке`,
     });
   };
 
   const removeFriend = (id: string) => {
     setFriends(friends.filter(f => f.id !== id));
+    setDirectMessages(directMessages.filter(dm => dm.friendId !== id));
     toast({
       description: "Друг удалён из списка",
     });
   };
 
-  const startPrivateCall = (friendName: string) => {
-    toast({
-      title: "Звонок",
-      description: `Вызов ${friendName}...`,
-    });
-    startCall();
+  const openDMChat = (dmId: string) => {
+    setSelectedDM(dmId);
+    setCurrentView('dm');
+    setMessages([]);
   };
 
   useEffect(() => {
@@ -262,8 +374,14 @@ const Index = () => {
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
       }
+      if (remoteStream) {
+        remoteStream.getTracks().forEach(track => track.stop());
+      }
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+      }
     };
-  }, [localStream]);
+  }, [localStream, remoteStream]);
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
@@ -273,8 +391,9 @@ const Index = () => {
           size="icon"
           className="w-12 h-12 rounded-2xl bg-primary hover:bg-primary/90 hover:rounded-xl transition-all duration-200"
           onClick={() => {
-            setCurrentView('chat');
-            setSelectedChannel('1');
+            setCurrentView('dm');
+            setSelectedServer(null);
+            setSelectedChannel(null);
           }}
         >
           <Icon name="Home" size={24} className="text-primary-foreground" />
@@ -292,8 +411,9 @@ const Index = () => {
             }`}
             onClick={() => {
               setSelectedServer(server.id);
-              setCurrentView('chat');
+              setCurrentView('server');
               setSelectedChannel('1');
+              setSelectedDM(null);
             }}
           >
             {server.icon}
@@ -307,7 +427,7 @@ const Index = () => {
           onClick={() => {
             toast({
               title: "Создание сервера",
-              description: "Функция в разработке",
+              description: "Введите название нового сервера",
             });
           }}
         >
@@ -316,99 +436,167 @@ const Index = () => {
       </div>
 
       <div className="w-60 bg-card flex flex-col">
-        <div className="h-12 px-4 flex items-center border-b border-border shadow-sm">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="w-full justify-between px-2 hover:bg-accent">
-                <span className="font-semibold">{servers.find(s => s.id === selectedServer)?.name}</span>
-                <Icon name="ChevronDown" size={16} />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-56">
-              <DropdownMenuItem onClick={() => toast({ description: "Отправьте ссылку-приглашение друзьям" })}>
-                <Icon name="UserPlus" size={16} className="mr-2" />
-                Пригласить
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setCurrentView('settings')}>
-                <Icon name="Settings" size={16} className="mr-2" />
-                Настройки сервера
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-
-        <ScrollArea className="flex-1 px-2 py-2">
-          <div className="space-y-1">
-            <Button
-              variant="ghost"
-              className="w-full justify-start px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => setCurrentView('friends')}
-            >
-              <Icon name="Users" size={18} className="mr-2" />
-              Друзья
-              {friends.length > 0 && (
-                <Badge variant="secondary" className="ml-auto">{friends.length}</Badge>
-              )}
-            </Button>
-            <Button
-              variant="ghost"
-              className="w-full justify-start px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => setCurrentView('notifications')}
-            >
-              <Icon name="Bell" size={18} className="mr-2" />
-              Уведомления
-            </Button>
-          </div>
-
-          <Separator className="my-3" />
-
-          <div className="space-y-0.5">
-            <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-              Текстовые каналы
+        {currentView === 'server' && selectedServer ? (
+          <>
+            <div className="h-12 px-4 flex items-center border-b border-border shadow-sm">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="w-full justify-between px-2 hover:bg-accent">
+                    <span className="font-semibold">{servers.find(s => s.id === selectedServer)?.name}</span>
+                    <Icon name="ChevronDown" size={16} />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56">
+                  <DropdownMenuItem onClick={() => toast({ description: "Отправьте ссылку друзьям" })}>
+                    <Icon name="UserPlus" size={16} className="mr-2" />
+                    Пригласить
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setCurrentView('settings')}>
+                    <Icon name="Settings" size={16} className="mr-2" />
+                    Настройки сервера
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
-            {channels.filter(c => c.type === 'text').map((channel) => (
-              <Button
-                key={channel.id}
-                variant="ghost"
-                className={`w-full justify-start px-2 ${
-                  selectedChannel === channel.id && currentView === 'chat' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                }`}
-                onClick={() => {
-                  setSelectedChannel(channel.id);
-                  setCurrentView('chat');
-                }}
+
+            <ScrollArea className="flex-1 px-2 py-2">
+              <div className="space-y-0.5">
+                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                  Текстовые каналы
+                </div>
+                {channels.filter(c => c.type === 'text').map((channel) => (
+                  <Button
+                    key={channel.id}
+                    variant="ghost"
+                    className={`w-full justify-start px-2 ${
+                      selectedChannel === channel.id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                    }`}
+                    onClick={() => {
+                      setSelectedChannel(channel.id);
+                      setMessages([]);
+                    }}
+                  >
+                    <Icon name="Hash" size={18} className="mr-2" />
+                    {channel.name}
+                  </Button>
+                ))}
+              </div>
+
+              <Separator className="my-3" />
+
+              <div className="space-y-0.5">
+                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                  Голосовые каналы
+                </div>
+                {channels.filter(c => c.type === 'voice').map((channel) => (
+                  <Button
+                    key={channel.id}
+                    variant="ghost"
+                    className="w-full justify-start px-2 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                    onClick={() => {
+                      if (!inCall) {
+                        startCall(channel.name, false);
+                      } else {
+                        endCall();
+                      }
+                    }}
+                  >
+                    <Icon name="Volume2" size={18} className="mr-2" />
+                    {channel.name}
+                  </Button>
+                ))}
+              </div>
+            </ScrollArea>
+          </>
+        ) : (
+          <>
+            <div className="h-12 px-4 flex items-center border-b border-border shadow-sm justify-between">
+              <span className="font-semibold">Личные сообщения</span>
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                className="w-8 h-8"
+                onClick={addFriend}
               >
-                <Icon name="Hash" size={18} className="mr-2" />
-                {channel.name}
+                <Icon name="UserPlus" size={18} />
               </Button>
-            ))}
-          </div>
-
-          <Separator className="my-3" />
-
-          <div className="space-y-0.5">
-            <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-              Голосовые каналы
             </div>
-            {channels.filter(c => c.type === 'voice').map((channel) => (
-              <Button
-                key={channel.id}
-                variant="ghost"
-                className="w-full justify-start px-2 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                onClick={() => {
-                  if (!inCall) {
-                    startCall();
-                  } else {
-                    endCall();
-                  }
-                }}
-              >
-                <Icon name="Volume2" size={18} className="mr-2" />
-                {channel.name}
-              </Button>
-            ))}
-          </div>
-        </ScrollArea>
+
+            <ScrollArea className="flex-1 px-2 py-2">
+              <div className="space-y-1">
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => {
+                    setCurrentView('friends');
+                    setSelectedDM(null);
+                  }}
+                >
+                  <Icon name="Users" size={18} className="mr-2" />
+                  Друзья
+                  {friends.length > 0 && (
+                    <Badge variant="secondary" className="ml-auto">{friends.length}</Badge>
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => {
+                    setCurrentView('notifications');
+                    setSelectedDM(null);
+                  }}
+                >
+                  <Icon name="Bell" size={18} className="mr-2" />
+                  Уведомления
+                </Button>
+              </div>
+
+              <Separator className="my-3" />
+
+              <div className="space-y-0.5">
+                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                  Сообщения
+                </div>
+                {directMessages.length === 0 ? (
+                  <div className="px-2 py-8 text-center text-xs text-muted-foreground">
+                    <p>Нет активных чатов</p>
+                    <p className="mt-1">Добавьте друзей</p>
+                  </div>
+                ) : (
+                  directMessages.map((dm) => (
+                    <Button
+                      key={dm.id}
+                      variant="ghost"
+                      className={`w-full justify-start px-2 py-2 h-auto ${
+                        selectedDM === dm.id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                      }`}
+                      onClick={() => openDMChat(dm.id)}
+                    >
+                      <div className="relative mr-2">
+                        <Avatar className="w-8 h-8">
+                          <AvatarImage src={dm.friendAvatar} />
+                          <AvatarFallback>{dm.friendName[0]}</AvatarFallback>
+                        </Avatar>
+                        {dm.status === 'online' && (
+                          <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-card"></div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 text-left">
+                        <div className="font-medium text-sm truncate">{dm.friendName}</div>
+                        <div className="text-xs truncate opacity-70">{dm.lastMessage}</div>
+                      </div>
+                      {dm.unread && (
+                        <Badge variant="default" className="ml-2 bg-primary text-primary-foreground">
+                          {dm.unread}
+                        </Badge>
+                      )}
+                    </Button>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </>
+        )}
 
         <div className="h-14 px-2 border-t border-border flex items-center gap-2 bg-muted/30">
           <Avatar className="w-8 h-8">
@@ -434,7 +622,7 @@ const Index = () => {
         {inCall && (
           <div className="h-14 bg-accent/30 border-b border-border px-4 flex items-center gap-3">
             <Icon name="Phone" size={18} className="text-primary animate-pulse" />
-            <span className="text-sm font-medium">Голосовой канал: {channels.find(c => c.type === 'voice')?.name}</span>
+            <span className="text-sm font-medium">Звонок: {callWith}</span>
             <div className="flex gap-2 ml-auto">
               <Button 
                 size="sm" 
@@ -471,36 +659,74 @@ const Index = () => {
         )}
 
         <div className="h-12 px-4 flex items-center border-b border-border shadow-sm">
-          <Icon name="Hash" size={20} className="text-muted-foreground mr-2" />
-          <span className="font-semibold">
-            {currentView === 'chat' && channels.find(c => c.id === selectedChannel)?.name}
-            {currentView === 'friends' && 'Друзья'}
-            {currentView === 'profile' && 'Профиль'}
-            {currentView === 'settings' && 'Настройки'}
-            {currentView === 'notifications' && 'Уведомления'}
-          </span>
+          {currentView === 'dm' && selectedDM && (
+            <>
+              <Avatar className="w-6 h-6 mr-2">
+                <AvatarImage src={directMessages.find(dm => dm.id === selectedDM)?.friendAvatar} />
+                <AvatarFallback>{directMessages.find(dm => dm.id === selectedDM)?.friendName[0]}</AvatarFallback>
+              </Avatar>
+              <span className="font-semibold">
+                {directMessages.find(dm => dm.id === selectedDM)?.friendName}
+              </span>
+            </>
+          )}
+          {currentView === 'server' && selectedChannel && (
+            <>
+              <Icon name="Hash" size={20} className="text-muted-foreground mr-2" />
+              <span className="font-semibold">{channels.find(c => c.id === selectedChannel)?.name}</span>
+            </>
+          )}
+          {currentView === 'friends' && (
+            <>
+              <Icon name="Users" size={20} className="text-muted-foreground mr-2" />
+              <span className="font-semibold">Друзья</span>
+            </>
+          )}
+          {currentView === 'settings' && (
+            <>
+              <Icon name="Settings" size={20} className="text-muted-foreground mr-2" />
+              <span className="font-semibold">Настройки</span>
+            </>
+          )}
+          {currentView === 'notifications' && (
+            <>
+              <Icon name="Bell" size={20} className="text-muted-foreground mr-2" />
+              <span className="font-semibold">Уведомления</span>
+            </>
+          )}
+          
           <div className="flex gap-2 ml-auto">
-            {currentView === 'chat' && (
+            {(currentView === 'dm' && selectedDM) && (
               <>
-                <Button variant="ghost" size="icon" className="w-9 h-9">
-                  <Icon name="Users" size={18} />
+                <Button 
+                  variant="ghost" 
+                  size="icon" 
+                  className="w-9 h-9"
+                  onClick={() => startCall(directMessages.find(dm => dm.id === selectedDM)?.friendName || '', false)}
+                >
+                  <Icon name="Phone" size={18} />
                 </Button>
-                <Button variant="ghost" size="icon" className="w-9 h-9">
-                  <Icon name="Search" size={18} />
+                <Button 
+                  variant="ghost" 
+                  size="icon" 
+                  className="w-9 h-9"
+                  onClick={() => startCall(directMessages.find(dm => dm.id === selectedDM)?.friendName || '', true)}
+                >
+                  <Icon name="Video" size={18} />
                 </Button>
               </>
             )}
           </div>
         </div>
 
-        {currentView === 'chat' && (
+        {(currentView === 'dm' || currentView === 'server') && (
           <>
             <ScrollArea className="flex-1 px-4 py-4">
               {messages.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-muted-foreground">
                   <div className="text-center">
                     <Icon name="MessageCircle" size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>Начните общение в этом канале</p>
+                    <p>Начните общение</p>
                   </div>
                 </div>
               ) : (
@@ -530,7 +756,10 @@ const Index = () => {
                   <Icon name="Plus" size={20} />
                 </Button>
                 <Input
-                  placeholder={`Написать в #${channels.find(c => c.id === selectedChannel)?.name}`}
+                  placeholder={currentView === 'dm' && selectedDM 
+                    ? `Сообщение для ${directMessages.find(dm => dm.id === selectedDM)?.friendName}`
+                    : `Написать в #${channels.find(c => c.id === selectedChannel)?.name}`
+                  }
                   value={messageInput}
                   onChange={(e) => setMessageInput(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
@@ -571,25 +800,51 @@ const Index = () => {
                 <div className="space-y-3">
                   {friends.map((friend) => (
                     <div key={friend.id} className="bg-card rounded-lg p-4 flex items-center gap-3 hover:bg-accent/50 transition-colors">
-                      <Avatar className="w-12 h-12">
-                        <AvatarImage src={friend.avatar} />
-                        <AvatarFallback>{friend.name[0]}</AvatarFallback>
-                      </Avatar>
+                      <div className="relative">
+                        <Avatar className="w-12 h-12">
+                          <AvatarImage src={friend.avatar} />
+                          <AvatarFallback>{friend.name[0]}</AvatarFallback>
+                        </Avatar>
+                        {friend.status === 'online' && (
+                          <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-card"></div>
+                        )}
+                      </div>
                       <div className="flex-1">
                         <div className="font-semibold">{friend.name}</div>
                         <div className="text-sm text-muted-foreground capitalize">{friend.status}</div>
                       </div>
                       <div className="flex gap-2">
-                        <Button variant="ghost" size="icon" onClick={() => toast({ description: "Личные сообщения скоро!" })}>
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          onClick={() => {
+                            const dm = directMessages.find(d => d.friendId === friend.id);
+                            if (dm) {
+                              openDMChat(dm.id);
+                            }
+                          }}
+                        >
                           <Icon name="MessageCircle" size={18} />
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => startPrivateCall(friend.name)}>
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          onClick={() => startCall(friend.name, false)}
+                        >
                           <Icon name="Phone" size={18} />
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => startPrivateCall(friend.name)}>
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          onClick={() => startCall(friend.name, true)}
+                        >
                           <Icon name="Video" size={18} />
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => removeFriend(friend.id)}>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          onClick={() => removeFriend(friend.id)}
+                        >
                           <Icon name="X" size={18} />
                         </Button>
                       </div>
@@ -618,7 +873,7 @@ const Index = () => {
                     <label className="text-sm font-medium mb-2 block">Email</label>
                     <Input defaultValue="user@example.com" />
                   </div>
-                  <Button onClick={() => toast({ title: "Сохранено", description: "Настройки успешно обновлены" })}>
+                  <Button onClick={() => toast({ title: "Сохранено", description: "Настройки обновлены" })}>
                     Сохранить изменения
                   </Button>
                 </div>
@@ -652,21 +907,46 @@ const Index = () => {
       </div>
 
       <Dialog open={showVideoDialog} onOpenChange={setShowVideoDialog}>
-        <DialogContent className="max-w-4xl">
+        <DialogContent className="max-w-5xl">
           <DialogHeader>
-            <DialogTitle>{isScreenSharing ? "Демонстрация экрана" : "Видеозвонок"}</DialogTitle>
+            <DialogTitle>
+              {isScreenSharing ? "Демонстрация экрана" : isVideoOn ? "Видеозвонок" : "Звонок"}
+            </DialogTitle>
             <DialogDescription>
-              {isScreenSharing ? "Вы демонстрируете свой экран" : "Ваша камера включена"}
+              {callWith && `Звонок с ${callWith}`}
             </DialogDescription>
           </DialogHeader>
-          <div className="bg-muted rounded-lg overflow-hidden aspect-video">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-muted rounded-lg overflow-hidden aspect-video relative">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-sm">
+                Вы
+              </div>
+            </div>
+            <div className="bg-muted rounded-lg overflow-hidden aspect-video relative flex items-center justify-center">
+              {remoteStream ? (
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="text-center text-muted-foreground">
+                  <Icon name="UserCircle" size={64} className="mx-auto mb-2 opacity-50" />
+                  <p>Ожидание подключения...</p>
+                </div>
+              )}
+              <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-sm">
+                {callWith}
+              </div>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
